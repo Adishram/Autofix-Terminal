@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window — includes PTY terminal access",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "pty:default"
+  ]
+}

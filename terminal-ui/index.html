@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AutoFix Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <!-- Title Bar -->
+    <header id="titlebar">
+      <div class="titlebar-left">
+        <h1 class="titlebar-title">AutoFix Terminal</h1>
+      </div>
+      <div class="titlebar-center">
+        <div class="tab active" id="tab-1">
+          <span class="tab-label">zsh</span>
+        </div>
+      </div>
+      <div class="titlebar-right">
+        <div class="status-indicator" id="status-dot">
+          <span class="dot"></span>
+          <span class="status-text">Connected</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Terminal Container -->
+    <main id="terminal-container"></main>
+  </body>
+</html>
