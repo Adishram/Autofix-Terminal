@@ -64,7 +64,8 @@ Rules:
 
 def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--ping":
-        api_base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
+        api_base = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+        api_base = api_base.replace("localhost", "127.0.0.1")
         try:
             import urllib.request
             req = urllib.request.Request(f"{api_base}/api/version")
