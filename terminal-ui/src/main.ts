@@ -40,7 +40,7 @@ const statusDot = document.querySelector("#status-dot .dot") as HTMLElement;
 const statusText = document.querySelector("#status-dot .status-text") as HTMLElement;
 
 const term = new Terminal({
-  fontFamily: "'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', monospace",
+  fontFamily: "'JetBrainsMono Nerd Font', 'MesloLGS NF', 'FiraCode Nerd Font', 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', monospace",
   fontSize: 14,
   lineHeight: 1.35,
   letterSpacing: 0,
@@ -64,22 +64,39 @@ term.loadAddon(new WebLinksAddon());
 term.open(container);
 fitAddon.fit();
 
-// ── Spawn PTY ─────────────────────────────────────────────────────────────────
-function setConnected(connected: boolean) {
+// ── Spawn PTY & LLM Status ───────────────────────────────────────────────────
+function setConnected(connected: boolean, text: string = "") {
   if (connected) {
     statusDot.classList.remove("disconnected");
-    statusText.textContent = "Connected";
+    statusText.textContent = text || "Connected";
   } else {
     statusDot.classList.add("disconnected");
-    statusText.textContent = "Disconnected";
+    statusText.textContent = text || "Disconnected";
   }
 }
+
+async function checkLlmStatus() {
+  try {
+    const res = await fetch("http://localhost:11434/api/version");
+    if (res.ok) {
+      setConnected(true, "LLM Connected");
+    } else {
+      setConnected(false, "LLM Disconnected");
+    }
+  } catch (e) {
+    setConnected(false, "LLM Disconnected");
+  }
+}
+
+// Check every 5 seconds
+setInterval(checkLlmStatus, 5000);
+checkLlmStatus();
 
 try {
   // Determine the user's shell
   const shell = getShell();
 
-  const pty = spawn(shell, [], {
+  const pty = spawn("/usr/bin/env", ["TERM=xterm-256color", shell, "-l"], {
     cols: term.cols,
     rows: term.rows,
   });
@@ -109,7 +126,6 @@ try {
   });
 
 } catch (err) {
-  setConnected(false);
   term.write(`\x1b[31mFailed to spawn shell: ${err}\x1b[0m\r\n`);
 }
 

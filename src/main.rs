@@ -5,13 +5,9 @@ use regex::Regex;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-// ─── Constants ──────────────────────────────────────────────────────────────────
-
-const MAX_RETRIES: usize = 3;
 
 // ─── CLI Definition ─────────────────────────────────────────────────────────────
 
@@ -43,18 +39,48 @@ struct AiFix {
     explanation: String,
 }
 
+#[derive(Debug, PartialEq)]
+enum ErrorCategory {
+    Syntax,
+    Fatal,
+    Runtime,
+}
+
+fn categorize_error(stderr: &str) -> ErrorCategory {
+    let lower_stderr = stderr.to_lowercase();
+    if lower_stderr.contains("syntaxerror") 
+        || lower_stderr.contains("indentationerror") 
+        || lower_stderr.contains("taberror")
+        || lower_stderr.contains("error: expected") {
+        ErrorCategory::Syntax
+    } else if lower_stderr.contains("recursionerror")
+        || lower_stderr.contains("memoryerror")
+        || lower_stderr.contains("assertionerror")
+        || lower_stderr.contains("segmentation fault") {
+        ErrorCategory::Fatal
+    } else {
+        ErrorCategory::Runtime
+    }
+}
+
 // ─── Process Execution ─────────────────────────────────────────────────────────
 
 /// Execute a command, streaming stdout in real-time and capturing stderr.
 /// Returns Ok(()) on success (exit 0), or Err(FailureInfo) on non-zero exit.
-fn execute_command(cmd: &[String]) -> Result<(), FailureInfo> {
+fn execute_command(cmd: &[String], piped_stdin: Option<&[u8]>) -> Result<(), FailureInfo> {
     let program = &cmd[0];
     let args = &cmd[1..];
 
-    let mut child = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args)
         .stdout(Stdio::inherit()) // stream stdout in real-time
-        .stderr(Stdio::piped())   // capture stderr
+        .stderr(Stdio::piped());   // capture stderr
+
+    if piped_stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
+
+    let mut child = command
         .spawn()
         .unwrap_or_else(|e| {
             eprintln!(
@@ -65,6 +91,15 @@ fn execute_command(cmd: &[String]) -> Result<(), FailureInfo> {
             );
             std::process::exit(1);
         });
+
+    if let Some(input_data) = piped_stdin {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let data = input_data.to_vec();
+            std::thread::spawn(move || {
+                let _ = child_stdin.write_all(&data);
+            });
+        }
+    }
 
     // Read stderr in a background-friendly way
     let stderr_handle = child.stderr.take();
@@ -107,24 +142,25 @@ fn execute_command(cmd: &[String]) -> Result<(), FailureInfo> {
 
 /// Attempt to locate the source file that triggered the error by parsing stderr.
 /// Supports common error formats from Python, Rust, C/C++, Go, TypeScript/JS, Java.
-fn detect_source_file(stderr: &str) -> Option<PathBuf> {
+fn detect_source_file(stderr: &str) -> Option<(PathBuf, Option<usize>)> {
     // Order matters: try the most specific patterns first.
     let patterns: Vec<Regex> = vec![
         // Python: File "path.py", line N
-        Regex::new(r#"File "([^"]+\.[a-zA-Z]+)", line \d+"#).unwrap(),
+        Regex::new(r#"File "([^"]+\.[a-zA-Z]+)", line (\d+)"#).unwrap(),
         // Rust: --> path.rs:N:N
-        Regex::new(r#"-->\s+([^\s:]+\.[a-zA-Z]+):\d+:\d+"#).unwrap(),
+        Regex::new(r#"-->\s+([^\s:]+\.[a-zA-Z]+):(\d+):\d+"#).unwrap(),
         // C/C++/Go/TS/JS/Java: path.ext:N:N: error/warning
-        Regex::new(r#"^([^\s:]+\.[a-zA-Z]+):\d+:\d*:?\s*(?:error|warning|Error|TypeError|SyntaxError)"#).unwrap(),
+        Regex::new(r#"^([^\s:]+\.[a-zA-Z]+):(\d+):\d*:?\s*(?:error|warning|Error|TypeError|SyntaxError)"#).unwrap(),
         // Generic: path.ext:N
-        Regex::new(r#"^([^\s:]+\.[a-zA-Z]+):\d+"#).unwrap(),
+        Regex::new(r#"^([^\s:]+\.[a-zA-Z]+):(\d+)"#).unwrap(),
     ];
 
     for pattern in &patterns {
         for cap in pattern.captures_iter(stderr) {
             let file_path = PathBuf::from(&cap[1]);
             if file_path.exists() {
-                return Some(file_path);
+                let line_num = cap.get(2).and_then(|m| m.as_str().parse::<usize>().ok());
+                return Some((file_path, line_num));
             }
         }
     }
@@ -137,7 +173,7 @@ fn detect_source_file(stderr: &str) -> Option<PathBuf> {
             // Skip common false positives
             let name = candidate.file_name().unwrap_or_default().to_string_lossy();
             if !name.starts_with('.') && !name.contains("lib") {
-                return Some(candidate);
+                return Some((candidate, None));
             }
         }
     }
@@ -148,14 +184,20 @@ fn detect_source_file(stderr: &str) -> Option<PathBuf> {
 // ─── AI Fixer Invocation ────────────────────────────────────────────────────────
 
 /// Call the Python AI brain script and parse its JSON response.
-fn call_ai_brain(file_path: &Path, stderr: &str) -> Result<AiFix, String> {
+fn call_ai_brain(file_path: &Path, stderr: &str, line_number: Option<usize>) -> Result<AiFix, String> {
     // Locate ai_brain.py relative to the current executable, falling back to cwd
     let brain_script = find_ai_brain_script();
 
-    let output = Command::new("python3")
-        .arg(&brain_script)
-        .arg(file_path.to_string_lossy().as_ref())
-        .arg(stderr)
+    let mut command = Command::new("python3");
+    command.arg(&brain_script)
+           .arg(file_path.to_string_lossy().as_ref())
+           .arg(stderr);
+           
+    if let Some(ln) = line_number {
+        command.arg(ln.to_string());
+    }
+
+    let output = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -348,6 +390,14 @@ fn main() {
     let cli = Cli::parse();
     let cmd = resolve_command(cli.command);
 
+    let mut piped_stdin_buffer = None;
+    if !io::stdin().is_terminal() {
+        let mut buffer = Vec::new();
+        if io::stdin().read_to_end(&mut buffer).is_ok() {
+            piped_stdin_buffer = Some(buffer);
+        }
+    }
+
     // Display what we're running
     println!(
         "{} Running: {}",
@@ -357,7 +407,7 @@ fn main() {
     println!();
 
     // ── First execution ──────────────────────────────────────────────────
-    let failure = match execute_command(&cmd) {
+    let failure = match execute_command(&cmd, piped_stdin_buffer.as_deref()) {
         Ok(()) => {
             // Success on first try — nothing to fix
             std::process::exit(0);
@@ -374,9 +424,32 @@ fn main() {
         style("Prepping for auto-fix...").dim()
     );
 
+    // ── Check LLM connection ─────────────────────────────────────────────
+    let brain_script = find_ai_brain_script();
+    let status = Command::new("python3")
+        .arg(&brain_script)
+        .arg("--ping")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if let Ok(s) = status {
+        if !s.success() {
+            eprintln!();
+            eprintln!("{} Failed to connect to the local LLM endpoint (Ollama).", style("✘").red().bold());
+            eprintln!("  Please make sure Ollama is running and a local LLM is available,");
+            eprintln!("  or connect to an LLM provider by configuring LITELLM_MODEL and OLLAMA_API_BASE.");
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!();
+        eprintln!("{} Failed to execute ai_brain.py to check LLM connection.", style("✘").red().bold());
+        std::process::exit(1);
+    }
+
     // ── Detect source file ───────────────────────────────────────────────
-    let source_file = match detect_source_file(&failure.stderr) {
-        Some(p) => p,
+    let (source_file, error_line) = match detect_source_file(&failure.stderr) {
+        Some((p, l)) => (p, l),
         None => {
             eprintln!(
                 "{} Could not automatically detect the source file from the error output.",
@@ -410,18 +483,50 @@ fn main() {
         style(backup_path.display()).dim()
     );
 
+    let source_file_clone = source_file.clone();
+    let backup_path_clone = backup_path.clone();
+    ctrlc::set_handler(move || {
+        println!("\n{} Ctrl-C received. Restoring original file...", style("⚠").yellow().bold());
+        if let Err(e) = restore_from_backup(&source_file_clone, &backup_path_clone) {
+            eprintln!("{} Failed to restore backup: {}", style("✘").red().bold(), e);
+        } else {
+            println!("{} Original file restored from backup.", style("↩").green().bold());
+        }
+        std::process::exit(130);
+    }).expect("Error setting Ctrl-C handler");
+
     // ── Auto-fix loop ────────────────────────────────────────────────────
     let mut current_stderr = failure.stderr.clone();
     #[allow(unused_assignments)]
     let mut last_explanation = String::from("No explanation available.");
 
-    for attempt in 1..=MAX_RETRIES {
+    let mut attempt = 0;
+
+    let mut current_file_content = match fs::read_to_string(&source_file) {
+        Ok(c) => c,
+        Err(_) => String::new(),
+    };
+
+    loop {
+        let category = categorize_error(&current_stderr);
+        
+        if category == ErrorCategory::Fatal {
+            println!();
+            println!(
+                "{} Fatal/Logical error detected. Auto-fix will attempt to fix it anyway...",
+                style("⚠").yellow().bold()
+            );
+        }
+        
+        attempt += 1;
+
         println!();
+        let attempt_type = if category == ErrorCategory::Syntax { "Syntax Fix Attempt" } else { "Runtime Fix Attempt" };
         println!(
-            "{} Auto-fix attempt {}/{}...",
+            "{} {} {}...",
             style("⟳").yellow().bold(),
-            style(attempt).bold(),
-            MAX_RETRIES
+            attempt_type,
+            style(attempt).bold()
         );
 
         // Call the AI brain
@@ -430,7 +535,7 @@ fn main() {
             style("⏳").dim()
         );
 
-        let ai_fix = match call_ai_brain(&source_file, &current_stderr) {
+        let ai_fix = match call_ai_brain(&source_file, &current_stderr, error_line) {
             Ok(fix) => fix,
             Err(e) => {
                 eprintln!(
@@ -438,13 +543,19 @@ fn main() {
                     style("✘").red().bold(),
                     e
                 );
-                if attempt == MAX_RETRIES {
-                    break;
-                }
                 continue;
             }
         };
-
+        
+        if ai_fix.fixed_code == current_file_content {
+            println!();
+            println!(
+                "{} AI returned the exact same code. Auto-fix will retry...",
+                style("⚠").yellow().bold()
+            );
+        }
+        
+        current_file_content = ai_fix.fixed_code.clone();
         last_explanation = ai_fix.explanation.clone();
 
         println!(
@@ -459,9 +570,6 @@ fn main() {
                 style("✘").red().bold(),
                 e
             );
-            if attempt == MAX_RETRIES {
-                break;
-            }
             continue;
         }
 
@@ -474,7 +582,7 @@ fn main() {
         );
         println!();
 
-        match execute_command(&cmd) {
+        match execute_command(&cmd, piped_stdin_buffer.as_deref()) {
             Ok(()) => {
                 // ── Success! Show the interactive UI ─────────────────────
                 show_post_fix_ui(&last_explanation, &source_file, &backup_path);
@@ -493,33 +601,4 @@ fn main() {
         }
     }
 
-    // ── All retries exhausted — restore from backup ──────────────────────
-    println!();
-    println!(
-        "{} Max retries ({}) exhausted. Auto-fix failed.",
-        style("✘").red().bold(),
-        MAX_RETRIES
-    );
-
-    match restore_from_backup(&source_file, &backup_path) {
-        Ok(()) => {
-            println!(
-                "{} Original file restored from backup.",
-                style("↩").green().bold()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "{} Failed to restore backup: {}",
-                style("✘").red().bold(),
-                e
-            );
-            eprintln!(
-                "  Your backup is still at: {}",
-                backup_path.display()
-            );
-        }
-    }
-
-    std::process::exit(1);
 }

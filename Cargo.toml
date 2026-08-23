@@ -12,6 +12,7 @@ dialoguer = "0.11"
 console = "0.15"
 similar = "2"
 regex = "1"
+ctrlc = "3.5.2"
 
 [profile.release]
 opt-level = 3

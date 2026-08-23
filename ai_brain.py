@@ -52,16 +52,29 @@ load_dotenv()
 # Kept short and direct to minimize token processing time.
 # No chain-of-thought, no preamble — just fix and return JSON.
 SYSTEM_PROMPT = """\
-You are a code fixer. Given source code and its error output, fix the bug.
+You are a code fixer. Given a code snippet and its error output, fix the bug.
 Return ONLY valid JSON, nothing else:
-{"fixed_code":"<entire corrected file>","explanation":"<2-3 sentence fix summary>"}
+{"fixed_code":"<entire corrected snippet>","explanation":"<2-3 sentence fix summary>"}
 Rules:
-- fixed_code must be the COMPLETE file, not a patch
+- fixed_code must be the COMPLETE fixed snippet, exactly replacing the input snippet lines.
 - Preserve original intent and comments
+- Do not output the entire file if you are only given a snippet, just the fixed snippet.
 - No markdown, no extra text, ONLY the JSON object"""
 
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--ping":
+        api_base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{api_base}/api/version")
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    sys.exit(0)
+        except Exception:
+            pass
+        sys.exit(1)
+
     if len(sys.argv) < 3:
         print(
             json.dumps({
@@ -75,22 +88,44 @@ def main():
     file_path = sys.argv[1]
     stderr_output = sys.argv[2]
 
-    # Read the source code
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            source_code = f.read()
-    except FileNotFoundError:
-        print(
-            json.dumps({
-                "fixed_code": "",
-                "explanation": f"Error: Could not read file '{file_path}'"
-            }),
-            file=sys.stdout,
-        )
-        sys.exit(1)
+    line_number = None
+    if len(sys.argv) > 3:
+        try:
+            line_number = int(sys.argv[3])
+        except ValueError:
+            pass
 
-    # Compact user message — minimal tokens for speed
-    user_message = f"FILE: {file_path}\nCODE:\n{source_code}\nERROR:\n{stderr_output}"
+    # Read the source code snippet from stdin
+    source_code = sys.stdin.read()
+    if not source_code:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                source_code = f.read()
+        except FileNotFoundError:
+            print(
+                json.dumps({
+                    "fixed_code": "",
+                    "explanation": f"Error: Could not read file '{file_path}'"
+                }),
+                file=sys.stdout,
+            )
+            sys.exit(1)
+
+    all_lines = source_code.splitlines()
+    is_snippet = False
+    start_idx = 0
+    end_idx = len(all_lines)
+
+    if line_number is not None and len(all_lines) > 50:
+        idx = line_number - 1
+        start_idx = max(0, idx - 15)
+        end_idx = min(len(all_lines), idx + 16)
+        snippet = "\n".join(all_lines[start_idx:end_idx])
+        user_message = f"FILE: {file_path} (Lines {start_idx+1}-{end_idx})\nCODE SNIPPET:\n{snippet}\nERROR:\n{stderr_output}"
+        is_snippet = True
+    else:
+        # Compact user message — minimal tokens for speed
+        user_message = f"FILE: {file_path}\nCODE SNIPPET:\n{source_code}\nERROR:\n{stderr_output}"
 
     # Model config — defaults to local Ollama Qwen 3.5 9B
     model = os.environ.get("LITELLM_MODEL", "ollama_chat/qwen3.5:9b")
@@ -130,6 +165,14 @@ def main():
         # Validate keys
         if "fixed_code" not in result or "explanation" not in result:
             raise ValueError("Missing required keys in LLM response")
+
+        if is_snippet:
+            fixed_snippet_lines = result["fixed_code"].splitlines()
+            new_lines = all_lines[:start_idx] + fixed_snippet_lines + all_lines[end_idx:]
+            result["fixed_code"] = "\n".join(new_lines) + "\n"
+        else:
+            if not result["fixed_code"].endswith("\n") and source_code.endswith("\n"):
+                result["fixed_code"] += "\n"
 
         # Output strict JSON to stdout
         print(json.dumps(result), file=sys.stdout)
