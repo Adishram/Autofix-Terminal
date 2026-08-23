@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoFix Terminal</title>
+    <meta name="description" content="An auto-fixing developer tool that resolves command errors locally using LLMs.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #111111;
+            --text-color: #eeeeee;
+            --accent-color: #ffffff;
+            --border-color: #333333;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1, h2, h3 {
+            font-family: 'Times New Roman', serif;
+            font-weight: normal;
+            color: var(--accent-color);
+        }
+
+        .container {
+            max-width: 800px;
+            width: 100%;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+
+        header {
+            margin-top: 4rem;
+            margin-bottom: 4rem;
+            text-align: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 4rem;
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            margin-bottom: 1rem;
+            margin-top: 0;
+        }
+
+        .subtitle {
+            font-size: 1.25rem;
+            color: #aaaaaa;
+            margin-bottom: 2rem;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .btn {
+            display: inline-block;
+            background-color: var(--accent-color);
+            color: var(--bg-color);
+            text-decoration: none;
+            padding: 0.75rem 1.5rem;
+            font-size: 1.1rem;
+            font-weight: 500;
+            transition: opacity 0.2s;
+            border-radius: 0;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        section {
+            margin-bottom: 4rem;
+        }
+
+        h2 {
+            font-size: 2rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.5rem;
+        }
+
+        ul {
+            list-style-type: square;
+            padding-left: 1.5rem;
+        }
+
+        li {
+            margin-bottom: 1rem;
+        }
+
+        .feature-title {
+            font-weight: 600;
+            color: var(--accent-color);
+        }
+
+        .code-block {
+            background-color: #000000;
+            border: 1px solid var(--border-color);
+            padding: 1rem;
+            font-family: monospace;
+            overflow-x: auto;
+        }
+
+        footer {
+            margin-top: 4rem;
+            padding: 2rem 0;
+            text-align: center;
+            border-top: 1px solid var(--border-color);
+            width: 100%;
+            font-size: 0.9rem;
+            color: #888888;
+        }
+
+        a {
+            color: var(--accent-color);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <h1>AutoFix Terminal</h1>
+            <p class="subtitle">An auto-fixing developer tool that wraps your command execution in a pseudo-terminal. When a command fails, it automatically captures the error, locates the failing source code, and uses a local Large Language Model to attempt to fix the error for you.</p>
+            <a href="https://github.com/Adishram/Autofix-Terminal/releases/latest" class="btn">Download for macOS</a>
+        </header>
+
+        <section id="features">
+            <h2>Features</h2>
+            <ul>
+                <li><span class="feature-title">Seamless Terminal Experience:</span> Built with Tauri and xterm.js, providing a familiar terminal interface that inherits your system environment and shell configurations.</li>
+                <li><span class="feature-title">Automatic Error Detection:</span> Parses standard error output to detect syntax and runtime errors in multiple languages including Python, Rust, C/C++, TypeScript, Javascript, Java, and Go.</li>
+                <li><span class="feature-title">Local LLM Integration:</span> Uses litellm and Ollama to generate code fixes locally, keeping your code private and avoiding external API costs.</li>
+                <li><span class="feature-title">Infinite Auto-Fix Loop:</span> The terminal will keep trying to fix the error in a loop until it succeeds. You can stop it manually at any time using Ctrl+C, which instantly restores the original file from a backup.</li>
+                <li><span class="feature-title">Live Status Indicator:</span> The GUI displays the real-time connection status of your local LLM.</li>
+            </ul>
+        </section>
+
+        <section id="prerequisites">
+            <h2>Prerequisites</h2>
+            <ul>
+                <li>macOS operating system.</li>
+                <li>Ollama installed and running locally on port 11434.</li>
+            </ul>
+        </section>
+
+        <section id="usage">
+            <h2>Usage</h2>
+            <p>Run any command using the autofix CLI wrapper. For example:</p>
+            <div class="code-block">
+                autofix python3 script.py
+            </div>
+            <p>If the script fails, AutoFix Terminal will intercept the failure and attempt to resolve it automatically.</p>
+        </section>
+    </div>
+
+    <footer>
+        <p>Open source under the MIT License. View on <a href="https://github.com/Adishram/Autofix-Terminal">GitHub</a>.</p>
+    </footer>
+
+</body>
+</html>
