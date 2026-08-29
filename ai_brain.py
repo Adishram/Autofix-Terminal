@@ -19,8 +19,8 @@ import os
 import json
 from pathlib import Path
 
-from litellm import completion
-
+# Disable remote cost map lookups in LiteLLM to prevent network timeouts/warnings
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 # ── Load .env file automatically ───────────────────────────────────────────────
 def load_dotenv():
@@ -69,12 +69,15 @@ def main():
         try:
             import urllib.request
             req = urllib.request.Request(f"{api_base}/api/version")
-            with urllib.request.urlopen(req, timeout=2) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 if response.status == 200:
                     sys.exit(0)
         except Exception:
             pass
         sys.exit(1)
+
+    # Lazy import of litellm so ping executes instantly
+    from litellm import completion
 
     if len(sys.argv) < 3:
         print(
@@ -130,7 +133,9 @@ def main():
 
     # Model config — defaults to local Ollama Qwen 3.5 9B
     model = os.environ.get("LITELLM_MODEL", "ollama_chat/qwen3.5:9b")
-    api_base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
+    api_base = os.environ.get("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+    if "localhost" in api_base:
+        api_base = api_base.replace("localhost", "127.0.0.1")
 
     try:
         response = completion(

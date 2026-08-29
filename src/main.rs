@@ -5,7 +5,7 @@ use regex::Regex;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -73,11 +73,14 @@ fn execute_command(cmd: &[String], piped_stdin: Option<&[u8]>) -> Result<(), Fai
 
     let mut command = Command::new(program);
     command.args(args)
+        .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::inherit()) // stream stdout in real-time
         .stderr(Stdio::piped());   // capture stderr
 
     if piped_stdin.is_some() {
         command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::inherit());
     }
 
     let mut child = command
@@ -101,31 +104,37 @@ fn execute_command(cmd: &[String], piped_stdin: Option<&[u8]>) -> Result<(), Fai
         }
     }
 
-    // Read stderr in a background-friendly way
+    // Read stderr in a background thread using raw chunks so partial lines (prompts) are displayed immediately
     let stderr_handle = child.stderr.take();
-    let mut stderr_output = String::new();
+    let stderr_output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_output_clone = std::sync::Arc::clone(&stderr_output);
 
-    if let Some(stderr) = stderr_handle {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    eprintln!("{}", l); // stream stderr to terminal too
-                    stderr_output.push_str(&l);
-                    stderr_output.push('\n');
+    let stderr_thread = std::thread::spawn(move || {
+        if let Some(mut stderr) = stderr_handle {
+            let mut buffer = [0u8; 1024];
+            let mut err_stream = io::stderr();
+            while let Ok(n) = stderr.read(&mut buffer) {
+                if n == 0 {
+                    break;
                 }
-                Err(e) => {
-                    eprintln!("Error reading stderr: {}", e);
+                let _ = err_stream.write_all(&buffer[..n]);
+                let _ = err_stream.flush();
+                let chunk = String::from_utf8_lossy(&buffer[..n]);
+                if let Ok(mut out) = stderr_output_clone.lock() {
+                    out.push_str(&chunk);
                 }
             }
         }
-    }
+    });
 
     let status = child.wait().unwrap_or_else(|e| {
         eprintln!("{} Failed to wait on child process: {}", style("✘").red().bold(), e);
         std::process::exit(1);
     });
 
+    let _ = stderr_thread.join();
+
+    let captured_stderr = stderr_output.lock().map(|s| s.clone()).unwrap_or_default();
     let exit_code = status.code().unwrap_or(-1);
 
     if exit_code == 0 {
@@ -133,7 +142,7 @@ fn execute_command(cmd: &[String], piped_stdin: Option<&[u8]>) -> Result<(), Fai
     } else {
         Err(FailureInfo {
             exit_code,
-            stderr: stderr_output,
+            stderr: captured_stderr,
         })
     }
 }
@@ -224,9 +233,53 @@ fn call_ai_brain(file_path: &Path, stderr: &str, line_number: Option<usize>) -> 
     Ok(fix)
 }
 
-/// Find the ai_brain.py script. Checks next to the executable first, then cwd.
+const EMBEDDED_BRAIN_SCRIPT: &str = include_str!("../ai_brain.py");
+
+/// Find the ai_brain.py script. Prioritizes local dev override, manifest dir, or embedded script.
 fn find_ai_brain_script() -> PathBuf {
-    // Check next to the running binary
+    // 1. Explicit env var override
+    if let Ok(env_override) = std::env::var("AUTOFIX_BRAIN_SCRIPT") {
+        let p = PathBuf::from(env_override);
+        if p.exists() {
+            return p;
+        }
+    }
+
+    // 2. Current working directory (for local dev)
+    let cwd = PathBuf::from("ai_brain.py");
+    if cwd.exists() {
+        return cwd;
+    }
+
+    // 3. Cargo manifest dir (for cargo run / tests)
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ai_brain.py");
+    if manifest_dir.exists() {
+        return manifest_dir;
+    }
+
+    // 4. Use embedded script written to temporary/cached directory
+    let temp_script = std::env::temp_dir().join("autofix_ai_brain.py");
+    let needs_write = match fs::read_to_string(&temp_script) {
+        Ok(existing) => existing != EMBEDDED_BRAIN_SCRIPT,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        if let Err(e) = fs::write(&temp_script, EMBEDDED_BRAIN_SCRIPT) {
+            eprintln!(
+                "{} Warning: Could not write embedded ai_brain.py to {}: {}",
+                style("⚠").yellow(),
+                temp_script.display(),
+                e
+            );
+        }
+    }
+
+    if temp_script.exists() {
+        return temp_script;
+    }
+
+    // 5. Fallback alongside binary
     if let Ok(exe) = std::env::current_exe() {
         let alongside = exe.parent().unwrap_or(Path::new(".")).join("ai_brain.py");
         if alongside.exists() {
@@ -234,20 +287,8 @@ fn find_ai_brain_script() -> PathBuf {
         }
     }
 
-    // Check current working directory
-    let cwd = PathBuf::from("ai_brain.py");
-    if cwd.exists() {
-        return cwd;
-    }
-
-    // Check the cargo manifest dir (for development)
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ai_brain.py");
-    if manifest_dir.exists() {
-        return manifest_dir;
-    }
-
     eprintln!(
-        "{} Could not locate ai_brain.py. Ensure it is in the same directory as the autofix binary or in the current working directory.",
+        "{} Could not locate or initialize ai_brain.py.",
         style("✘").red().bold()
     );
     std::process::exit(1);
@@ -426,25 +467,31 @@ fn main() {
 
     // ── Check LLM connection ─────────────────────────────────────────────
     let brain_script = find_ai_brain_script();
-    let status = Command::new("python3")
+    let ping_output = Command::new("python3")
         .arg(&brain_script)
         .arg("--ping")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .output();
 
-    if let Ok(s) = status {
-        if !s.success() {
+    match ping_output {
+        Ok(output) if output.status.success() => {
+            // LLM is connected!
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!();
             eprintln!("{} Failed to connect to the local LLM endpoint (Ollama).", style("✘").red().bold());
+            if !stderr.trim().is_empty() {
+                eprintln!("  {}", style(stderr.trim()).dim());
+            }
             eprintln!("  Please make sure Ollama is running and a local LLM is available,");
             eprintln!("  or connect to an LLM provider by configuring LITELLM_MODEL and OLLAMA_API_BASE.");
             std::process::exit(1);
         }
-    } else {
-        eprintln!();
-        eprintln!("{} Failed to execute ai_brain.py to check LLM connection.", style("✘").red().bold());
-        std::process::exit(1);
+        Err(e) => {
+            eprintln!();
+            eprintln!("{} Failed to execute ai_brain.py to check LLM connection: {}", style("✘").red().bold(), e);
+            std::process::exit(1);
+        }
     }
 
     // ── Detect source file ───────────────────────────────────────────────
@@ -531,7 +578,7 @@ fn main() {
 
         // Call the AI brain
         println!(
-            "  {} Sending code + error to AI...",
+            "  {} Sending code + error to LLM...",
             style("⏳").dim()
         );
 
